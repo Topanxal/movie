@@ -4,6 +4,11 @@ const conn = require('../db/db')
 const svgCaptcha = require('svg-captcha')
 const util = require('../util/util')
 const multer = require('multer')
+const app = express()
+const bodyParser = require('body-parser')
+
+// 使用 body-parser 中间件来解析 JSON 格式的请求体
+app.use(bodyParser.json())
 
 // 用户API
 let user = {}
@@ -294,34 +299,237 @@ router.post('/api/updateUserInfo', function (req, res) {
   }
 })
 //加载电影列表
+// router.get('/api/getMovieList', function (req, res) {
+//   let sqlStr =
+//     'SELECT * FROM t_schedule INNER JOIN t_movie ON t_schedule.movie_id = t_movie.movie_id;'
+//   conn.query(sqlStr, (error, result, field) => {
+//     if (error) {
+//       console.log(error)
+//       res.json({ error_code: 1, message: '获取电影列表失败' })
+//     } else {
+//       result = JSON.parse(JSON.stringify(result))
+//       if (result.length) {
+//         // result = result.filter((value)=>{
+//         //   return new Date(value.show_date+','+value.show_time)-new Date()>0;
+//         // });
+//         for (let i = 0; i < result.length; i++) {
+//           for (let j = i + 1; j < result.length; j++) {
+//             if (result[i]['movie_id'] === result[j]['movie_id']) {
+//               result.splice(j, 1)
+//               j = j - 1
+//             }
+//           }
+//         }
+//         res.json({ success_code: 200, data: result })
+//       } else {
+//         res.json({ error_code: 1, message: '电影列表为空' })
+//       }
+//     }
+//   })
+// })
+//加载电影列表
+// 加载电影列表
 router.get('/api/getMovieList', function (req, res) {
-  let sqlStr =
-    'SELECT * FROM t_schedule INNER JOIN t_movie ON t_schedule.movie_id = t_movie.movie_id;'
-  conn.query(sqlStr, (error, result, field) => {
+  // 获取当前日期
+  const currentDate = new Date()
+  const currentYear = currentDate.getFullYear()
+  const currentMonth = currentDate.getMonth() + 1 // 月份从 0 开始，需要加 1
+  const currentDay = currentDate.getDate()
+
+  // 计算前 30 天和后 30 天的日期
+  const startDate = new Date(currentDate)
+  startDate.setDate(currentDate.getDate() - 30)
+  const endDate = new Date(currentDate)
+  endDate.setDate(currentDate.getDate() + 30)
+
+  // 格式化日期为 YYYY-MM-DD
+  const formatDate = (date) => {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
+  // const startDateStr = formatDate(startDate)
+  // const endDateStr = formatDate(endDate)
+  const startDateStr = '2022-11-11'
+  const endDateStr = '2023-01-11'
+
+  // SQL 查询：筛选出上映日期在前 30 天到后 30 天之间的电影
+  let sqlStr = `
+    SELECT DISTINCT t_movie.* 
+    FROM t_movie
+    WHERE t_movie.public_date BETWEEN ? AND ?
+    ORDER BY t_movie.public_date ASC;
+  `
+
+  // 执行查询
+  conn.query(sqlStr, [startDateStr, endDateStr], (error, result, field) => {
     if (error) {
       console.log(error)
       res.json({ error_code: 1, message: '获取电影列表失败' })
     } else {
       result = JSON.parse(JSON.stringify(result))
+
       if (result.length) {
-        // result = result.filter((value)=>{
-        //   return new Date(value.show_date+','+value.show_time)-new Date()>0;
-        // });
-        for (let i = 0; i < result.length; i++) {
-          for (let j = i + 1; j < result.length; j++) {
-            if (result[i]['movie_id'] === result[j]['movie_id']) {
-              result.splice(j, 1)
-              j = j - 1
-            }
+        // 去重逻辑（如果 SQL 的 DISTINCT 不够用，可以在这里进一步去重）
+        const uniqueMovies = []
+        const movieIdSet = new Set()
+        for (const movie of result) {
+          if (!movieIdSet.has(movie.movie_id)) {
+            movieIdSet.add(movie.movie_id)
+            uniqueMovies.push(movie)
           }
         }
-        res.json({ success_code: 200, data: result })
+
+        res.json({ success_code: 200, data: uniqueMovies })
       } else {
         res.json({ error_code: 1, message: '电影列表为空' })
       }
     }
   })
 })
+// 获取推荐电影列表
+router.post('/api/getRecommendedMovies', async (req, res) => {
+  const { userId, candidateMovies } = req.body
+
+  // await getCandidateMovies()
+
+  if (!userId) {
+    return res.json({ error_code: 1, message: '用户未登录' })
+  }
+
+  try {
+    // 获取用户想看电影列表
+    const wishList = await getWishList(userId)
+    if (!wishList.length) {
+      return res.json({ error_code: 1, message: '用户无想看电影' })
+    }
+
+    // 获取所有电影的向量数据
+    const movieVectors = await getMovieVectors([
+      ...wishList,
+      ...candidateMovies.map((m) => m.movie_id),
+    ])
+
+    // 计算推荐分数
+    const recommendedMovies = candidateMovies.map((movie) => {
+      const movieVec = movieVectors[movie.movie_id] || []
+      let rec_score = 0
+
+      wishList.forEach((wishId) => {
+        const wishVec = movieVectors[wishId] || []
+        rec_score += cosineSimilarity(movieVec, wishVec)
+      })
+
+      return { ...movie, rec_score: rec_score }
+    })
+
+    // 返回推荐结果
+    res.json({
+      success_code: 200,
+      data: recommendedMovies
+        .filter((m) => m.score > 0) // 过滤低分项
+        .sort((a, b) => b.rec_score - a.rec_score) // 按分数排序
+        .slice(0, 10), // 取前10个
+    })
+  } catch (error) {
+    console.error('推荐计算失败:', error)
+    res.json({ error_code: 1, message: '推荐计算失败' })
+  }
+})
+
+// 工具函数：获取用户想看电影列表
+function getWishList(userId) {
+  return new Promise((resolve, reject) => {
+    const sqlStr = 'SELECT movie_id FROM t_wishmovie WHERE user_id = ?;'
+    conn.query(sqlStr, [userId], (error, results) => {
+      if (error) return reject(error)
+      resolve(results.map((item) => item.movie_id))
+    })
+  })
+}
+
+// 工具函数：获取候选电影列表
+function getCandidateMovies() {
+  return new Promise((resolve, reject) => {
+    const sqlStr = `
+      SELECT * FROM t_movie 
+      WHERE public_date <= NOW() 
+      UNION 
+      SELECT * FROM t_movie 
+      WHERE public_date > NOW() 
+      ORDER BY score DESC, wish_num DESC 
+      LIMIT 100;
+    `
+    conn.query(sqlStr, (error, results) => {
+      if (error) return reject(error)
+      resolve(results)
+    })
+  })
+}
+
+// 工具函数：获取电影向量数据
+function getMovieVectors(movieIds) {
+  return new Promise((resolve, reject) => {
+    const sqlStr = `
+      SELECT movie_id, GROUP_CONCAT(user_id ORDER BY user_id) AS vector 
+      FROM t_wishmovie 
+      WHERE movie_id IN (?) 
+      GROUP BY movie_id;
+    `
+    conn.query(sqlStr, [movieIds], (error, results) => {
+      if (error) return reject(error)
+      const vectors = {}
+      results.forEach((row) => {
+        vectors[row.movie_id] = row.vector.split(',').map(Number)
+      })
+      resolve(vectors)
+    })
+  })
+}
+
+// 工具函数：计算余弦相似度
+function cosineSimilarity(vecA, vecB) {
+  let dot = 0,
+    normA = 0,
+    normB = 0
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i]
+    normA += vecA[i] ** 2
+    normB += vecB[i] ** 2
+  }
+  return normA && normB ? dot / (Math.sqrt(normA) * Math.sqrt(normB)) : 0
+}
+
+// router.get('/api/getMovieList', function (req, res) {
+//   // 使用 LIMIT 20 限制查询结果为前 20 条记录
+//   let sqlStr =
+//     'SELECT * FROM t_schedule INNER JOIN t_movie ON t_schedule.movie_id = t_movie.movie_id LIMIT 20;'
+//   conn.query(sqlStr, (error, result, field) => {
+//     if (error) {
+//       console.log(error)
+//       res.json({ error_code: 1, message: '获取电影列表失败' })
+//     } else {
+//       result = JSON.parse(JSON.stringify(result))
+//       if (result.length) {
+//         // 去除重复的电影记录
+//         for (let i = 0; i < result.length; i++) {
+//           for (let j = i + 1; j < result.length; j++) {
+//             if (result[i]['movie_id'] === result[j]['movie_id']) {
+//               result.splice(j, 1)
+//               j = j - 1
+//             }
+//           }
+//         }
+//         res.json({ success_code: 200, data: result })
+//       } else {
+//         res.json({ error_code: 1, message: '电影列表为空' })
+//       }
+//     }
+//   })
+// })
+
 //加载电影详细信息
 router.get('/api/getMovieDetail', function (req, res) {
   let movieId = req.query.movieId
@@ -554,32 +762,49 @@ router.post('/api/updateUserSupport', function (req, res) {
     },
   )
 })
+
 //加载影院列表
 router.get('/api/getCinemaList', function (req, res) {
-  let sqlStr =
-    'SELECT * FROM t_schedule INNER JOIN t_cinema ON t_schedule.cinema_id = t_cinema.cinema_id INNER JOIN t_movie ON t_schedule.movie_id = t_movie.movie_id;'
+  // 只从 t_cinema 表中查询影院信息
+  let sqlStr = 'SELECT * FROM t_cinema;'
   conn.query(sqlStr, (error, result, field) => {
     if (error) {
+      // 查询出错，返回错误信息
       res.json({ error_code: 1, message: '获取影院列表失败' })
     } else {
+      // 将结果转换为 JSON 字符串再解析，确保数据格式正确
       result = JSON.parse(JSON.stringify(result))
-      if (result.length) {
-        // result = result.filter((value)=>{
-        //   return new Date(value.show_date+','+value.show_time)-new Date()>0;
-        // });
-        for (let i = 0; i < result.length; i++) {
-          for (let j = i + 1; j < result.length; j++) {
-            if (result[i]['cinema_id'] === result[j]['cinema_id']) {
-              result.splice(j, 1)
-              j = j - 1
-            }
-          }
-        }
-      }
+      // 返回成功信息和查询结果
       res.json({ success_code: 200, data: result })
     }
   })
 })
+// //加载影院列表
+// router.get('/api/getCinemaList', function (req, res) {
+//   let sqlStr =
+//     'SELECT * FROM t_schedule INNER JOIN t_cinema ON t_schedule.cinema_id = t_cinema.cinema_id INNER JOIN t_movie ON t_schedule.movie_id = t_movie.movie_id;'
+//   conn.query(sqlStr, (error, result, field) => {
+//     if (error) {
+//       res.json({ error_code: 1, message: '获取影院列表失败' })
+//     } else {
+//       result = JSON.parse(JSON.stringify(result))
+//       if (result.length) {
+//         // result = result.filter((value)=>{
+//         //   return new Date(value.show_date+','+value.show_time)-new Date()>0;
+//         // });
+//         for (let i = 0; i < result.length; i++) {
+//           for (let j = i + 1; j < result.length; j++) {
+//             if (result[i]['cinema_id'] === result[j]['cinema_id']) {
+//               result.splice(j, 1)
+//               j = j - 1
+//             }
+//           }
+//         }
+//       }
+//       res.json({ success_code: 200, data: result })
+//     }
+//   })
+// })
 //加载当前影院详细信息
 router.get('/api/getCurrentCinemaDetail', function (req, res) {
   let cinemaId = req.query.cinemaId
@@ -598,6 +823,70 @@ router.get('/api/getCurrentCinemaDetail', function (req, res) {
     }
   })
 })
+// //加载当前影院排片
+// router.get('/api/getCurrentCinemaMovieSchedule', function (req, res) {
+//   let cinemaId = req.query.cinemaId
+//   console.log(cinemaId)
+//   let sqlStr = 'SELECT * FROM t_schedule WHERE cinema_id = ?;'
+//   conn.query(sqlStr, [cinemaId], (error, result, field) => {
+//     if (error) {
+//       console.log(error)
+//       res.json({ error_code: 1, message: '获取当前影院排片信息失败' })
+//     } else {
+//       result = JSON.parse(JSON.stringify(result))
+//       if (result) {
+//         let tempMovieArr = []
+//         result.forEach((value) => {
+//           if (
+//             new Date() - new Date(value.show_date + ',' + value.show_time) <=
+//             0
+//           ) {
+//             tempMovieArr.push(value.movie_id)
+//           }
+//         })
+//         tempMovieArr = Array.from(new Set(tempMovieArr))
+//         let movieArray = []
+//         let movieScheduleArray = []
+//         tempMovieArr.forEach((value) => {
+//           sqlStr = 'SELECT * FROM t_movie WHERE movie_id = ? LIMIT 1;'
+//           conn.query(sqlStr, [value], (error, result, field) => {
+//             if (error) {
+//               console.log(error)
+//             } else {
+//               result = JSON.parse(JSON.stringify(result))
+//               if (result[0]) {
+//                 movieArray.push(result[0])
+//               }
+//             }
+//           })
+//           sqlStr =
+//             'SELECT * FROM t_schedule schedule INNER JOIN t_movie movie ON schedule.movie_id = movie.movie_id WHERE schedule.movie_id = ? AND schedule.cinema_id = ?;'
+//           conn.query(sqlStr, [value, cinemaId], (error, result, field) => {
+//             if (error) {
+//               console.log(error)
+//             } else {
+//               result = JSON.parse(JSON.stringify(result))
+//               if (result) {
+//                 movieScheduleArray.push(result)
+//               }
+//             }
+//           })
+//         })
+//         setTimeout(() => {
+//           res.json({
+//             success_code: 200,
+//             data: {
+//               hasMovieInfo: movieArray,
+//               movieScheduleInfo: movieScheduleArray,
+//             },
+//           })
+//         }, 500)
+//       } else {
+//         res.json({ error_code: 1, message: '当前影院排片信息为空' })
+//       }
+//     }
+//   })
+// })
 //加载当前影院排片
 router.get('/api/getCurrentCinemaMovieSchedule', function (req, res) {
   let cinemaId = req.query.cinemaId
@@ -609,13 +898,13 @@ router.get('/api/getCurrentCinemaMovieSchedule', function (req, res) {
       res.json({ error_code: 1, message: '获取当前影院排片信息失败' })
     } else {
       result = JSON.parse(JSON.stringify(result))
-      if (result) {
+      if (result.length) {
         let tempMovieArr = []
+        // 假设当前时间为 2023 年 1 月 1 日 0:00:00
+
         result.forEach((value) => {
-          if (
-            new Date() - new Date(value.show_date + ',' + value.show_time) <=
-            0
-          ) {
+          const showDateTime = new Date(value.show_date + ',' + value.show_time)
+          if (now - showDateTime <= 0) {
             tempMovieArr.push(value.movie_id)
           }
         })
@@ -706,11 +995,10 @@ router.get('/api/getCurrentMovieSchedule', function (req, res) {
       result = JSON.parse(JSON.stringify(result))
       if (result) {
         let tempDateArr = []
+        // 假设当前时间为 2023 年 1 月 1 日 0:00:00
+        const now = new Date('2023-01-01T00:00:00')
         result.forEach((value) => {
-          if (
-            new Date() - new Date(value.show_date + ',' + value.show_time) <=
-            0
-          ) {
+          if (now - new Date(value.show_date + ',' + value.show_time) <= 0) {
             tempDateArr.push(value.show_date)
           }
         })
