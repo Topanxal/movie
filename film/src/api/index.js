@@ -45,6 +45,27 @@ export const updateUserInfo = (
   );
 //获取电影列表
 export const getMovieList = () => ajax("/api/getMovieList");
+// 获取推荐电影列表
+export const getRecommendedMovies = (userId,candidateMovies) => ajax(
+  "/api/getRecommendedMovies",
+  { userId, candidateMovies },
+  "POST"
+);
+
+// 获取用户想看电影列表
+export const getUserWishList = userId => {
+  return instance.get("/api/getUserWishList", {
+    params: { userId }
+  });
+};
+
+// 获取电影向量数据
+export const getMoviesVectors = movieIds => {
+  return instance.get("/api/getMoviesVectors", {
+    params: { movieIds: movieIds.join(",") } // 将数组转换为逗号分隔的字符串
+  });
+};
+
 //获取电影详情
 export const getMovieDetail = movieId =>
   ajax("/api/getMovieDetail", { movieId });
